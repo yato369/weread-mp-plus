@@ -408,6 +408,10 @@ export class WmcView extends ItemView {
     main.createDiv('wmc-watch-text');
     main.createDiv('wmc-progress').createDiv('wmc-progress-fill');
     const actions = bar.createDiv('wmc-watch-actions');
+    // 全量刷新进行中 → 给一个显眼的停止入口（队列可能还排着十几个号）
+    if (this.plugin.isSweeping()) {
+      this.iconBtn(actions, 'square', '停止刷新全部（已拉到的不回滚）', () => this.plugin.stopSweep());
+    }
     // 手动跑一轮：盯只更新列表，采只归档已发现的文章
     this.iconBtn(actions, 'zap', '立即盯一轮（只更新列表，不写笔记）', () =>
       void this.plugin.runOnce(true, { list: true, collect: false }),
@@ -458,7 +462,10 @@ export class WmcView extends ItemView {
 
     if (s.busy) {
       mode = 'busy';
-      if (s.phase === 'list') {
+      if (s.phase === 'sweep') {
+        pct = s.accountTotal ? s.accountIndex / s.accountTotal : 0;
+        t = `正在刷新全部：拉「${s.account || '…'}」的最新一页（第 ${s.accountIndex}/${s.accountTotal} 个号，可随时停止）`;
+      } else if (s.phase === 'list') {
         pct = s.accountTotal ? s.accountIndex / s.accountTotal : 0;
         t = `正在盯列表「${s.account || '…'}」（第 ${s.accountIndex}/${s.accountTotal} 个号）`;
       } else {
@@ -484,6 +491,15 @@ export class WmcView extends ItemView {
       const p = (n: number) => String(n).padStart(2, '0');
       const last = this.plugin.state.lastRun;
       t = `${flags} · 上次 ${p(d.getHours())}:${p(d.getMinutes())} 落盘 ${last?.written ?? 0} 篇`;
+      pct = 1;
+    } else if (this.plugin.state.lastSweep) {
+      // 手动全量刷新过、但盯采两个开关都关着：显示上次刷新的结果，别写「两个开关都关着」误导
+      const sw = this.plugin.state.lastSweep;
+      const d = new Date(sw.at);
+      const p = (n: number) => String(n).padStart(2, '0');
+      t = `${flags} · 上次刷新全部 ${p(d.getHours())}:${p(d.getMinutes())} · ${sw.scanned} 个号${
+        sw.added ? ` 新增 ${sw.added} 篇` : ' 无新文章'
+      }`;
       pct = 1;
     } else {
       t = '两个开关都关着 — 「盯」只更新列表，「采」才会归档';
@@ -873,19 +889,42 @@ export class WmcView extends ItemView {
     const top = side.createDiv('wmc-side-head');
     top.createSpan({ cls: 'wmc-side-title', text: '公众号' });
     const syncBtn = top.createEl('button', { cls: 'wmc-icon-btn' });
-    setIcon(syncBtn, 'refresh-cw');
-    syncBtn.setAttr('aria-label', '拉取当前号最新 1 页（不拉历史、不归档）');
+    const sweeping = this.plugin.isSweeping();
+    // 有效期内换个表针图标：一眼看出「现在点也没用」，而不是点了才弹提示
+    const sweepLocked = !this.account && this.plugin.sweepLeftMs() > 0;
+    setIcon(syncBtn, sweeping ? 'square' : sweepLocked ? 'clock' : 'refresh-cw');
+    const labelFor = (): string => {
+      if (sweeping) return '停止刷新（已拉到的不回滚）';
+      if (this.account) return '拉取当前号最新 1 页（不拉历史、不归档）';
+      const hours = this.plugin.sweepValidHours();
+      const left = this.plugin.sweepLeftMs();
+      if (left > 0) {
+        const h = Math.floor(left / 3600_000);
+        const m = Math.ceil((left % 3600_000) / 60000);
+        return `全量刷新 ${hours} 小时内只做一次：还剩 ${h ? `${h} 小时 ` : ''}${m} 分钟（点了只提示，不发请求）`;
+      }
+      return `刷新全部号的最新一页（${hours} 小时一次；按时间重排，限速排队防 -2014）`;
+    };
+    syncBtn.setAttr('aria-label', labelFor());
     // LoadingOrb：Claude Code 用的字符轮转，5 帧叠在同一位置只切透明度，字符不抖动
     syncBtn.addEventListener('click', () => {
       void (async () => {
-      // 未选具体号时交给 fetchLatestForAccount 给出明确提示（「全部文章」不能直接拉）
       if (syncBtn.hasClass('is-syncing')) return;
+      // 正在全量刷新 → 这个按钮变成「停止」
+      if (this.plugin.isSweeping()) {
+        this.plugin.stopSweep();
+        return;
+      }
       const orbCtl = this.mountOrb(syncBtn);
       orbCtl.start();
-      syncBtn.setAttr('aria-label', '拉取中…');
-      const n = await this.plugin.fetchLatestForAccount(this.account);
+      syncBtn.setAttr('aria-label', '刷新中…');
+      // 「全部文章」不再要求先点一个号：排队把每个号的最新一页拉一遍，
+      // 每拉完一个号插件就会重排列表，边刷边能按时间看到更新
+      const n = this.account
+        ? await this.plugin.fetchLatestForAccount(this.account)
+        : await this.plugin.refreshAllAccounts().then((r) => r.added);
       orbCtl.stop();
-      syncBtn.setAttr('aria-label', '拉取当前号最新 1 页（不拉历史、不归档）');
+      syncBtn.setAttr('aria-label', labelFor());
       if (n > 0) this.renderList();
         })();
     });

@@ -169,6 +169,18 @@ interface WMState {
    * 这里缓存「按需取到」的结果，侧栏「原文」直接展示，不再每次重新请求。
    */
   mpUrls?: Record<string, string>;
+  /**
+   * 号名 → 上次刷新过「最新一页」的时间。
+   * 全量刷新靠它决定先刷谁（最久没刷的排前面）、以及跳过刚刷过的号，
+   * 避免连点两次把当天的请求预算全烧掉。
+   */
+  accountRefreshedAt?: Record<string, number>;
+  /** 全量刷新的冷却截止时间（两次全量之间强制等待） */
+  sweepUntil?: number;
+  /** 全量刷新的当日计数（YYYY-MM-DD），配合 sweepCount 限制每天次数 */
+  sweepDay?: string;
+  sweepCount?: number;
+  lastSweep?: { at: number; scanned: number; added: number; error?: string };
 }
 
 /**
@@ -231,7 +243,39 @@ const SAFE_RATE = {
   listPerHour: 12,
 } as const;
 
+/**
+ * 「全部文章 → 刷新」= 全量扫描。
+ * 列表接口只接受单个 bookId，没有「所有号一起返回」的端点，
+ * 所以一次全量 = 队列长度次列表请求（28 个号就是 28 次）。
+ * 这个量级和历史上撞 -2014 的「一轮 27 个号」是同一数量级，
+ * 区别只在间隔与频次，因此必须加约束：
+ *   ① 一次全量在 validHours 小时内有效 —— 期间再点只提示、不发请求；
+ *   ② 每个自然日最多 perDay 次（兜底，正常受 ① 限制够不到）；
+ *   ③ 单次内部仍走 listGate（间隔 + 每小时预算），预算不够就只刷一部分；
+ *   ④ 有效期内不需要重刷的号（含盯采刚拉过的）直接跳过。
+ * 28 次 ≈ 用户当前盯采配置（2 号/15 分钟）3.5 小时的量，12 小时只跑一次很安全。
+ */
+const SWEEP = {
+  /** 一次全量的有效期（小时）：有效期内再点「刷新全部」只给提示，不发任何请求 */
+  validHours: 12,
+  /** 兜底：每自然日最多几次（正常被 validHours 卡住，够不到） */
+  perDay: 3,
+  /** 这么久之内刷过的号直接跳过，不重复消耗预算 */
+  staleHours: 12,
+  /**
+   * 队列没扫完（小时预算不够被截断 / 用户中途停止）时的短冷静期：
+   * 这种情况不能套 12h 锁，否则剩下十几个号要等到明天才能补。
+   */
+  resumeGapMin: 5,
+} as const;
+
 const sleep = (ms: number) => new Promise<void>((r) => window.setTimeout(r, ms));
+
+/** 本地时区的日期键（YYYY-MM-DD），用于「每天最多 N 次」这类计数 */
+function dayKey(at = new Date()): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${at.getFullYear()}-${p(at.getMonth() + 1)}-${p(at.getDate())}`;
+}
 
 /**
  * 并发受限的批量执行。
@@ -319,7 +363,7 @@ export interface WatchStatus {
   /** 采：定时把已发现的未归档文章落盘 */
   collecting: boolean;
   busy: boolean;
-  phase: 'idle' | 'list' | 'fetch' | 'done' | 'cooldown';
+  phase: 'idle' | 'list' | 'sweep' | 'fetch' | 'done' | 'cooldown';
   account?: string;
   accountIndex: number;
   accountTotal: number;
@@ -359,6 +403,9 @@ export default class WereadMpCatcher extends Plugin {
   /** 列表请求硬闸门：上次时间 + 近 1 小时计数（所有入口共用） */
   private lastListReqAt = 0;
   private listReqLog: number[] = [];
+  /** 全量刷新（「全部文章 → 刷新」）的运行标记与停止开关 */
+  private sweepRunning = false;
+  private sweepStop = false;
   /** Set-Cookie 续期后的写盘防抖 + 保活定时器 */
   private cookieSaveTimer: number | null = null;
   private keepAliveTimer: number | null = null;
@@ -1566,6 +1613,8 @@ export default class WereadMpCatcher extends Plugin {
     const offset = reset ? 0 : this.state.accountOffsets[acc.name] || 0;
     try {
       const items = await client.listArticles(acc.bookId, offset);
+      if (!this.state.accountRefreshedAt) this.state.accountRefreshedAt = {};
+      this.state.accountRefreshedAt[acc.name] = Date.now();
       let added = 0;
       for (const it of items) {
         if (!this.state.discovered[it.reviewId]) {
@@ -1632,6 +1681,8 @@ export default class WereadMpCatcher extends Plugin {
     if (!this.state.discovered) this.state.discovered = {};
     try {
       const items = await client.listArticles(acc.bookId, 0);
+      if (!this.state.accountRefreshedAt) this.state.accountRefreshedAt = {};
+      this.state.accountRefreshedAt[acc.name] = Date.now();
       let added = 0;
       for (const it of items) {
         if (this.state.discovered[it.reviewId]) continue;
@@ -1662,6 +1713,247 @@ export default class WereadMpCatcher extends Plugin {
       if (!silent) new Notice(`拉取失败：${msg}`, 9000);
       return 0;
     }
+  }
+
+  /* ------------------------ 全量刷新（「全部文章 → 刷新」） ------------------------ */
+
+  isSweeping(): boolean {
+    return this.sweepRunning;
+  }
+
+  /** 全量刷新有效期内剩余毫秒（0 = 可以刷） */
+  sweepLeftMs(): number {
+    return Math.max(0, (this.state.sweepUntil ?? 0) - Date.now());
+  }
+
+  /** 一次全量的有效期（小时），给 UI 文案用，避免两处硬编码 */
+  sweepValidHours(): number {
+    return SWEEP.validHours;
+  }
+
+  /** 用户点「停止」：本轮不再请求剩下的号，已刷新到的结果全部保留 */
+  stopSweep(): void {
+    if (!this.sweepRunning) return;
+    this.sweepStop = true;
+    new Notice('已停止：不再请求剩下的号，已刷新到的已保留', 5000);
+  }
+
+  /** 剩余的小时预算（和 listGate 共用同一份计数，绝不越过闸门上限） */
+  private listBudgetLeft(): number {
+    const now = Date.now();
+    this.listReqLog = this.listReqLog.filter((t) => now - t < 3600_000);
+    const budget = this.settings.rateSafeMode !== false ? SAFE_RATE.listPerHour : 120;
+    return Math.max(0, budget - this.listReqLog.length);
+  }
+
+  /** 列表条目并入发现清单，返回新增条数 */
+  private mergeDiscovered(acc: AccountRef, items: ArticleItem[]): number {
+    if (!this.state.discovered) this.state.discovered = {};
+    let added = 0;
+    for (const it of items) {
+      if (this.state.discovered[it.reviewId]) continue;
+      this.state.discovered[it.reviewId] = {
+        account: acc.name,
+        title: it.title,
+        time: it.time,
+        readNum: it.readNum,
+        likeNum: it.likeNum,
+        picUrl: it.picUrl,
+        digest: it.digest,
+      };
+      added++;
+    }
+    return added;
+  }
+
+  /**
+   * 「全部文章 → 刷新」：把每个号的最新一页（20 条）排队拉一遍，边拉边并入列表。
+   *
+   * 为什么必须排队：列表接口只接受单个 bookId，服务端没有「一次返回所有号」的端点，
+   * 所以一次全量 = 队列长度次请求。安全性靠 listGate（间隔 + 每小时预算）+ 本方法的三重节流：
+   *   ① 两次全量间隔 ≥ SWEEP.gapMin；② 每自然日 ≤ SWEEP.perDay 次；
+   *   ③ staleMin 内刷过的号直接跳过（重复点击几乎不发请求）。
+   * 每拉完一个号就 notifyViews()，列表立刻按发布时间重排，不用等 28 个号全跑完。
+   */
+  async refreshAllAccounts(): Promise<{ scanned: number; added: number; deferred: number; kept: number; error?: string }> {
+    const empty = { scanned: 0, added: 0, deferred: 0, kept: 0 };
+    if (this.sweepRunning) {
+      new Notice('全量刷新正在进行中');
+      return empty;
+    }
+    if (this.running) {
+      new Notice('盯采正在跑，等这一轮结束再刷新', 5000);
+      return empty;
+    }
+    const cookie = normalizeCookie(this.settings.cookie || '');
+    if (!this.hasLogin()) {
+      new Notice('还没登录：先扫码登录', 6000);
+      return empty;
+    }
+    const coolLeft = (this.state.listCooldownUntil ?? 0) - Date.now();
+    if (coolLeft > 0) {
+      new Notice(`列表接口限频冷却中，约 ${Math.max(1, Math.ceil(coolLeft / 60000))} 分钟后可再试（-2014）`, 9000);
+      return empty;
+    }
+    const sweepLeft = (this.state.sweepUntil ?? 0) - Date.now();
+    if (sweepLeft > 0) {
+      // 一次全量的结果在 validHours 内视为有效：期间不重复打 28 次请求
+      const h = Math.floor(sweepLeft / 3600_000);
+      const m = Math.ceil((sweepLeft % 3600_000) / 60000);
+      const last = this.state.lastSweep;
+      const tail = last ? `（上次刷了 ${last.scanned} 个号、新增 ${last.added} 篇）` : '';
+      new Notice(
+        `全量刷新 ${SWEEP.validHours} 小时内只做一次：还剩 ${h ? `${h} 小时 ` : ''}${m} 分钟后才能再刷${tail}\n` +
+          '单个号仍可点选后刷新；盯采开着时列表也会自己更新',
+        12000,
+      );
+      return empty;
+    }
+    const today = dayKey();
+    const usedToday = this.state.sweepDay === today ? this.state.sweepCount ?? 0 : 0;
+    if (usedToday >= SWEEP.perDay) {
+      new Notice(`今天已经全量刷新 ${usedToday} 次（上限 ${SWEEP.perDay} 次），明天再来；单个号仍可随时点右上角刷新`, 9000);
+      return empty;
+    }
+
+    const accounts = this.settings.accounts.filter((a) => String(a.bookId || '').toUpperCase().startsWith('MP_WXS_'));
+    if (!accounts.length) {
+      new Notice('还没有要盯的公众号：先从左栏设置里勾选', 6000);
+      return empty;
+    }
+
+    // 最久没刷过的排前面：中途被预算或手动停止打断时，优先补齐的是最旧那批
+    if (!this.state.accountRefreshedAt) this.state.accountRefreshedAt = {};
+    const refreshed = this.state.accountRefreshedAt;
+    const now0 = Date.now();
+    const staleMs = SWEEP.staleHours * 3600_000;
+    const pending = accounts
+      .filter((a) => now0 - (refreshed[a.name] || 0) >= staleMs)
+      .sort((a, b) => (refreshed[a.name] || 0) - (refreshed[b.name] || 0));
+    const kept = accounts.length - pending.length;
+    if (!pending.length) {
+      // 全都还在有效期内：不发请求，直接给结论
+      new Notice(`${accounts.length} 个号在 ${SWEEP.staleHours} 小时内都刷过了（含盯采自动拉的），无需重刷`, 7000);
+      return { ...empty, kept };
+    }
+
+    const budget = this.listBudgetLeft();
+    if (budget <= 0) {
+      new Notice('近 1 小时的列表请求预算已用完，等一会儿再刷（这是防风控闸门）', 8000);
+      return { ...empty, deferred: pending.length, kept };
+    }
+    const queue = pending.slice(0, budget);
+    const deferred = pending.length - queue.length;
+    if (deferred > 0) {
+      new Notice(`小时预算只剩 ${budget} 次，本次刷 ${queue.length} 个号，其余 ${deferred} 个下轮补`, 8000);
+    }
+
+    this.sweepRunning = true;
+    this.sweepStop = false;
+    this.running = true; // 与 runOnce 互斥：定时器这一轮会自己跳过
+    this.watch.busy = true;
+    this.watch.phase = 'sweep';
+    this.watch.accountIndex = 0;
+    this.watch.accountTotal = queue.length;
+    this.watch.lastError = undefined;
+    this.pushLog(`开始刷新全部：${queue.length} 个号，每号 1 次列表请求`);
+    this.emitWatch();
+    this.renderStatus();
+
+    const client = new WereadClient(this.http, cookie);
+    let scanned = 0;
+    let added = 0;
+    let error: string | undefined;
+    let completed = false;
+    try {
+      for (const acc of queue) {
+        if (this.sweepStop) break;
+        this.watch.account = acc.name;
+        try {
+          const items = await client.listArticles(acc.bookId, 0);
+          added += this.mergeDiscovered(acc, items);
+          refreshed[acc.name] = Date.now();
+          scanned++;
+          // 每拉完一个号立刻重排一次列表 —— 边刷边能看到按时间排好的最新文章
+          this.notifyViews();
+          await this.saveAll();
+        } catch (e) {
+          if (e instanceof RiskError) throw e;
+          this.pushLog(`「${acc.name}」刷新失败：${e instanceof Error ? e.message : String(e)}`, 'warn');
+        } finally {
+          this.watch.accountIndex++;
+          this.emitWatch();
+        }
+      }
+      // 一轮跑通 = 限频已解除，清零冷却计数（与 runOnce 同一套判定）
+      if (!this.sweepStop) {
+        this.state.listCooldownHits = 0;
+        this.state.listCooldownUntil = 0;
+      }
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+      this.watch.lastError = error.slice(0, 60);
+      this.pushLog(`全量刷新中断：${error}`, 'err');
+      if (e instanceof RiskError && e.code === -2014) {
+        const hits = (this.state.listCooldownHits ?? 0) + 1;
+        const hours = Math.min(24, 2 ** hits);
+        this.state.listCooldownHits = hits;
+        this.state.listCooldownUntil = Date.now() + hours * 3600_000;
+        const until = new Date(this.state.listCooldownUntil).toLocaleString();
+        this.pushLog(`列表接口被限频，冷却到 ${until}（第 ${hits} 次，${hours} 小时）`, 'err');
+        new Notice(`列表接口限频（-2014）\n已暂停到 ${until}\n期间不会发任何列表请求`, 12000);
+      } else {
+        new Notice(`刷新中断：${error}`, 9000);
+      }
+    } finally {
+      this.sweepRunning = false;
+      this.running = false;
+      this.watch.busy = false;
+      this.watch.phase = error ? 'cooldown' : 'done';
+      // 队列扫完一整轮 → 结果在 validHours 内有效，期间再点只提示、不发请求；
+      // 被小时预算截断或手动停止 → 只给短冷静期，剩下的号能马上接着补，否则要等到明天
+      const done = !error && !this.sweepStop && deferred === 0;
+      completed = done;
+      this.state.sweepUntil =
+        Date.now() + (done ? SWEEP.validHours * 3600_000 : SWEEP.resumeGapMin * 60000);
+      this.state.sweepCount = usedToday + 1;
+      this.state.sweepDay = today;
+      this.state.lastSweep = { at: Date.now(), scanned, added, error };
+      await this.saveAll();
+      this.pushLog(
+        done
+          ? added > 0
+            ? `全量刷新：${scanned} 个号，新增 ${added} 篇（${SWEEP.validHours} 小时内不再重复请求）`
+            : `全量刷新：${scanned} 个号，没有新文章（${SWEEP.validHours} 小时内不再重复请求）`
+          : `全量刷新只跑了 ${scanned} 个号，其余等 ${SWEEP.resumeGapMin} 分钟后可继续`,
+        added > 0 ? 'ok' : 'info',
+      );
+      this.emitWatch();
+      this.renderStatus();
+      this.notifyViews();
+    }
+
+    if (!error) {
+      if (!completed) {
+        // 手动停止时 deferred 是 0，剩下的号在 queue 里没跑到，要一起算
+        const remaining = Math.max(0, queue.length - scanned) + deferred;
+        new Notice(
+          remaining > 0
+            ? `本次刷了 ${scanned} 个号，还有 ${remaining} 个没轮到；${SWEEP.resumeGapMin} 分钟后可再点刷新继续补齐`
+            : `本次刷了 ${scanned} 个号就停了；${SWEEP.resumeGapMin} 分钟后可再点刷新`,
+          9000,
+        );
+      } else {
+        const tail = kept ? `（跳过 ${kept} 个 ${SWEEP.staleHours} 小时内已刷过的）` : '';
+        new Notice(
+          added > 0
+            ? `刷新完成：${scanned} 个号，新增 ${added} 篇${tail}；${SWEEP.validHours} 小时内全量刷新不再请求`
+            : `刷新完成：${scanned} 个号都没有新文章${tail}；${SWEEP.validHours} 小时内全量刷新不再请求`,
+          8000,
+        );
+      }
+    }
+    return { scanned, added, deferred, kept, error };
   }
 
   async syncNewArticles(name: string, maxPages = 5): Promise<number> {
@@ -2229,6 +2521,9 @@ export default class WereadMpCatcher extends Plugin {
             }
           }
           queueByAccount.push({ acc, items: fresh.slice(0, this.settings.maxPerAccount) });
+          // 记下这个号刚刷过：侧栏「刷新全部」会跳过它，不重复消耗预算
+          if (!this.state.accountRefreshedAt) this.state.accountRefreshedAt = {};
+          this.state.accountRefreshedAt[acc.name] = Date.now();
         } catch (e) {
           if (e instanceof RiskError) throw e;
           skipped++;
