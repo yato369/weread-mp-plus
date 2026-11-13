@@ -13,17 +13,25 @@
 <p align="center">
   <a href="README_EN.md">English</a> ·
   <a href="#三分钟上手">快速开始</a> ·
+  <a href="#相对上游的改动">相对上游的改动</a> ·
   <a href="#常见问题">常见问题</a> ·
-  <a href="https://github.com/pixelxzen/Zisuzi-Weread-MP/issues">反馈问题</a>
+  <a href="https://github.com/yato369/weread-mp-plus/issues">反馈问题</a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/pixelxzen/Zisuzi-Weread-MP/releases"><img src="https://img.shields.io/github/v/release/pixelxzen/Zisuzi-Weread-MP?style=flat-square&color=474980" alt="Release" /></a>
-  <a href="https://github.com/pixelxzen/Zisuzi-Weread-MP/releases"><img src="https://img.shields.io/github/downloads/pixelxzen/Zisuzi-Weread-MP/total?style=flat-square&color=474980" alt="Downloads" /></a>
+  <a href="https://github.com/yato369/weread-mp-plus/releases"><img src="https://img.shields.io/github/v/release/yato369/weread-mp-plus?style=flat-square&color=474980" alt="Release" /></a>
   <img src="https://img.shields.io/badge/Obsidian-1.13.0%2B-7C3AED?style=flat-square" alt="Obsidian 1.13.0+" />
   <img src="https://img.shields.io/badge/Desktop-only-555?style=flat-square" alt="Desktop only" />
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/pixelxzen/Zisuzi-Weread-MP?style=flat-square&color=474980" alt="License" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/yato369/weread-mp-plus?style=flat-square&color=474980" alt="License" /></a>
 </p>
+
+> [!IMPORTANT]
+> **来源说明 / Attribution**
+>
+> 本项目 fork 自 **[pixelxzen/Zisuzi-Weread-MP](https://github.com/pixelxzen/Zisuzi-Weread-MP)**（微信读书公众号盯采），原作者 **紫苏子ACG**。
+> 依照 **GPL-3.0** 保留原始版权与许可声明，本仓库的改动同样以 GPL-3.0 发布。
+> 本仓库是在其基础上自行增强的分支，**与上游作者无隶属关系**；遇到问题请在本仓库的 [Issues](https://github.com/yato369/weread-mp-plus/issues) 反馈，不要打扰上游作者。
+> 想要原版（无本地增强）请直接用 [上游仓库](https://github.com/pixelxzen/Zisuzi-Weread-MP)。
 
 ---
 
@@ -92,17 +100,32 @@ flowchart LR
 - **中间**：卡片 / 瀑布流 / 列表 / 标题四种视图，文章卡片带归档状态
 - **底部**：上次抓取结果、进度、下一轮倒计时，自动盯采状态一目了然
 
+## 相对上游的改动
+
+本仓库从上游 `v4.4.4`（2026-10-19）分叉，此后 21 次提交累积到 `v4.9.9`。改动方向集中在一件事上：**在微信读书真实的限流下能长期稳定地跑下去**。
+
+| 主题 | 做了什么 |
+|---|---|
+| 登录态自动续期 | 吸收 `Set-Cookie` + 80 分钟保活；改走 Node 原生 https 调 `/web/login/renewal` 换 `wr_skey`（`requestUrl` 会剥掉 Set-Cookie，此前两版因此失效）；Electron 会话兜底直读 cookie 容器 |
+| 防风控 | 全局限速闸门 `listGate` + 更保守的安全档；冷却期对侧栏同步/翻页/自检一并生效；改间隔参数时拦截提醒 |
+| 刷新全部 | 改为「受限全量扫描」：12 小时有效期、每自然日 3 次兜底、12h 内跳过已刷号、按小时预算截断并标 `deferred` 供续刷、队列未扫完可随时停止 |
+| 错误如实化 | 状态 200 却返回 `{errCode:-2012}` 时不再误判为「只存了封面/摘要」，而是报登录过期并静默续期重试；预览解析为空记诊断日志 |
+| 预览不落盘 | 详情页预览直接读正文（纯内存），点「归档」才写笔记；「盯」与「采」拆成两个动作 |
+| 交互细节 | 图标中文气泡、设置页重绘保留滚动位置、删除/重命名笔记实时同步索引、启动时按文件存在性清理幽灵索引 |
+
+> 逐版本说明见 [CHANGELOG.md](CHANGELOG.md)；上游的原始功能与设计见[上游仓库](https://github.com/pixelxzen/Zisuzi-Weread-MP)。
+
 ## 三分钟上手
 
 **1. 安装**
 
-`设置 → 第三方插件 → 浏览 → 搜索「Zisuzi-Weread-MP」` → 安装 → 启用。
+本插件不在 Obsidian 社区插件市场里，需要手动安装：从 [Releases](https://github.com/yato369/weread-mp-plus/releases) 下载 `main.js`、`manifest.json`、`styles.css`，放进 `<你的库>/.obsidian/plugins/weread-mp-fork/`，然后在「第三方插件」里重新加载并启用。
 
-手动安装：从 [Releases](https://github.com/pixelxzen/Zisuzi-Weread-MP/releases) 下载 `main.js`、`manifest.json`、`styles.css`，放进 `<你的库>/.obsidian/plugins/zisuzi-weread-mp/`，然后在「第三方插件」里重新加载并启用。
+> 目录名保持 `weread-mp-fork` 不变（插件 id 未改），这样从上游版本升级过来时，已登录的 Cookie 和盯采配置都会继续生效。
 
 **2. 扫码登录**
 
-`设置 → Zisuzi-Weread-MP` → 点 **扫码登录** → 在弹出的窗口里用微信扫一下。
+`设置 → Weread MP Plus` → 点 **扫码登录** → 在弹出的窗口里用微信扫一下。
 登录成功后窗口自动关闭，头像、昵称、书架全部自动就位。
 
 **3. 选号**
@@ -187,7 +210,7 @@ npm test         # 核心逻辑单测（需先构建 dist/core）
 
 ## 反馈与贡献
 
-- **Bug / 功能建议**：[Issues](https://github.com/pixelxzen/Zisuzi-Weread-MP/issues)（请附 Obsidian 版本、插件版本、`设置 → 第三方插件 → 调试` 里的报错）
+- **Bug / 功能建议**：[Issues](https://github.com/yato369/weread-mp-plus/issues)（请附 Obsidian 版本、插件版本、`设置 → 第三方插件 → 调试` 里的报错）
 - **PR**：欢迎。提交前请跑 `npm run build && npm test`，并保持 `eslint-plugin-obsidianmd` recommended 规则零告警。
 - 这个插件会长期迭代：微信读书接口一变就要跟着修，所以你的 Issue 就是它的生命力。
 
@@ -200,7 +223,11 @@ npm test         # 核心逻辑单测（需先构建 dist/core）
 
 **GPL-3.0-only**
 
-Copyright © 2026 Creative by [紫苏子ACG](https://github.com/pixelxzen)
+Copyright © 2026 Creative by [紫苏子ACG](https://github.com/pixelxzen)（原作者，原始项目 [pixelxzen/Zisuzi-Weread-MP](https://github.com/pixelxzen/Zisuzi-Weread-MP)）
+
+Copyright © 2026 [yato369](https://github.com/yato369)（本分支自 v4.4.8 起的修改）
+
+本项目依照 **GNU General Public License v3.0** 发布。你可以自由使用、修改、再分发，但**必须保留上述版权声明与许可声明**，并以同一许可证开放源代码。完整条款见 [LICENSE](LICENSE)。
 
 ---
 

@@ -7,11 +7,11 @@
   "author": "紫苏子ACG",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/pixelxzen/Zisuzi-Weread-MP.git"
+    "url": "git+https://github.com/yato369/weread-mp-plus.git"
   },
-  "homepage": "https://github.com/pixelxzen/Zisuzi-Weread-MP#readme",
+  "homepage": "https://github.com/yato369/weread-mp-plus#readme",
   "bugs": {
-    "url": "https://github.com/pixelxzen/Zisuzi-Weread-MP/issues"
+    "url": "https://github.com/yato369/weread-mp-plus/issues"
   },
   "scripts": {
     "dev": "node esbuild.config.mjs",

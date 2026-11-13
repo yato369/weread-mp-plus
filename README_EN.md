@@ -14,16 +14,22 @@
   <a href="README.md">简体中文</a> ·
   <a href="#quickstart">Quickstart</a> ·
   <a href="#faq">FAQ</a> ·
-  <a href="https://github.com/pixelxzen/Zisuzi-Weread-MP/issues">Issues</a>
+  <a href="https://github.com/yato369/weread-mp-plus/issues">Issues</a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/pixelxzen/Zisuzi-Weread-MP/releases"><img src="https://img.shields.io/github/v/release/pixelxzen/Zisuzi-Weread-MP?style=flat-square&color=474980" alt="Release" /></a>
-  <a href="https://github.com/pixelxzen/Zisuzi-Weread-MP/releases"><img src="https://img.shields.io/github/downloads/pixelxzen/Zisuzi-Weread-MP/total?style=flat-square&color=474980" alt="Downloads" /></a>
+  <a href="https://github.com/yato369/weread-mp-plus/releases"><img src="https://img.shields.io/github/v/release/yato369/weread-mp-plus?style=flat-square&color=474980" alt="Release" /></a>
   <img src="https://img.shields.io/badge/Obsidian-1.13.0%2B-7C3AED?style=flat-square" alt="Obsidian 1.13.0+" />
   <img src="https://img.shields.io/badge/Desktop-only-555?style=flat-square" alt="Desktop only" />
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/pixelxzen/Zisuzi-Weread-MP?style=flat-square&color=474980" alt="License" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/yato369/weread-mp-plus?style=flat-square&color=474980" alt="License" /></a>
 </p>
+
+> [!IMPORTANT]
+> **Attribution**
+>
+> This project is a fork of **[pixelxzen/Zisuzi-Weread-MP](https://github.com/pixelxzen/Zisuzi-Weread-MP)** by **紫苏子ACG**.
+> Original copyright and license notices are retained as required by **GPL-3.0**; this fork is released under the same license.
+> It is an independently maintained branch and is **not affiliated with the upstream author** — please report issues to [this repository](https://github.com/yato369/weread-mp-plus/issues), not upstream.
 
 ---
 
@@ -97,7 +103,7 @@ flowchart LR
 
 `Settings → Community plugins → Browse → search "Zisuzi-Weread-MP"` → Install → Enable.
 
-Manual: download `main.js`, `manifest.json`, `styles.css` from [Releases](https://github.com/pixelxzen/Zisuzi-Weread-MP/releases), drop them into `<vault>/.obsidian/plugins/zisuzi-weread-mp/`, then reload and enable.
+This plugin is **not** in the Obsidian community plugin list. Manual install: download `main.js`, `manifest.json`, `styles.css` from [Releases](https://github.com/yato369/weread-mp-plus/releases), drop them into `<vault>/.obsidian/plugins/weread-mp-fork/`, then reload and enable. (Folder name stays `weread-mp-fork` so upgrading from upstream keeps your cookies and settings.)
 
 **2. Sign in**
 
@@ -185,7 +191,7 @@ Outputs `main.js` / `manifest.json` / `styles.css` at the repo root. Architectur
 
 ## Contributing
 
-- **Bugs / ideas**: [Issues](https://github.com/pixelxzen/Zisuzi-Weread-MP/issues) — include Obsidian version, plugin version and the error from `Settings → Community plugins → Debug`.
+- **Bugs / ideas**: [Issues](https://github.com/yato369/weread-mp-plus/issues) — include Obsidian version, plugin version and the error from `Settings → Community plugins → Debug`.
 - **PRs**: welcome. Run `npm run build && npm test` and keep `eslint-plugin-obsidianmd` recommended at zero warnings.
 
 ## Credits
@@ -197,4 +203,8 @@ Outputs `main.js` / `manifest.json` / `styles.css` at the repo root. Architectur
 
 **GPL-3.0-only**
 
-Copyright © 2026 Creative by [紫苏子ACG](https://github.com/pixelxzen)
+Copyright © 2026 Creative by [紫苏子ACG](https://github.com/pixelxzen) (original author — [upstream repo](https://github.com/pixelxzen/Zisuzi-Weread-MP))
+
+Copyright © 2026 [yato369](https://github.com/yato369) (modifications since v4.4.8)
+
+Released under the **GNU General Public License v3.0**. You may use, modify and redistribute it, but you **must keep the copyright and license notices above** and open-source your derivative under the same license. See [LICENSE](LICENSE).
